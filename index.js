@@ -1,5 +1,5 @@
 // Import our outputted wasm ES6 module
-import init, { encrypt_aes256, decrypt_aes256 } from "./pkg/wasm_aes.js";
+import init, { AesConfig, encrypt_aes256, decrypt_aes256, version, default_config_info } from "./pkg/wasm_aes.js";
 
 /**
  * Downloads a file with the given content and filename
@@ -38,10 +38,34 @@ function validatePassword(password) {
   return { valid: true };
 }
 
+/**
+ * Parse error from WASM and extract useful information
+ */
+function parseWasmError(error) {
+  const errorStr = error.toString();
+  // Try to extract error code
+  const codeMatch = errorStr.match(/\[Error (\d+)\]/);
+  if (codeMatch) {
+    return {
+      code: parseInt(codeMatch[1]),
+      message: errorStr
+    };
+  }
+  return { code: null, message: errorStr };
+}
+
 const runWasm = async () => {
   try {
     // Instantiate our wasm module
     await init("./pkg/wasm_aes_bg.wasm");
+
+    // Log library info
+    console.log(`WASM AES Library v${version()}`);
+    console.log(default_config_info());
+
+    // Create default configuration
+    const config = new AesConfig();
+    console.log(`Configuration: PBKDF2 iterations = ${config.pbkdf2Iterations}`);
 
     // Get DOM elements
     const encryptFileInput = document.getElementById('encrypt-file');
@@ -82,9 +106,9 @@ const runWasm = async () => {
         const arrayBuffer = await file.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
 
-        // Encrypt using WASM
+        // Encrypt using WASM with configuration
         const startTime = performance.now();
-        const encryptedData = encrypt_aes256(uint8Array, password);
+        const encryptedData = encrypt_aes256(uint8Array, password, config);
         const endTime = performance.now();
         const processingTime = ((endTime - startTime) / 1000).toFixed(2);
 
@@ -106,7 +130,12 @@ const runWasm = async () => {
         encryptPasswordInput.value = '';
 
       } catch (error) {
-        setStatus('encrypt-status', `Encryption failed: ${error.message}`, 'error');
+        const errInfo = parseWasmError(error);
+        let errorMessage = `Encryption failed: ${errInfo.message}`;
+        if (errInfo.code) {
+          errorMessage = `Encryption failed (Error ${errInfo.code}): ${errInfo.message}`;
+        }
+        setStatus('encrypt-status', errorMessage, 'error');
         console.error('Encryption error:', error);
       } finally {
         encryptBtn.disabled = false;
@@ -139,9 +168,14 @@ const runWasm = async () => {
         const arrayBuffer = await file.arrayBuffer();
         const uint8Array = new Uint8Array(arrayBuffer);
 
-        // Decrypt using WASM
+        // Check if file is large enough
+        if (uint8Array.length < config.minEncryptedSize) {
+          throw new Error(`File is too small to be a valid encrypted file (minimum: ${config.minEncryptedSize} bytes)`);
+        }
+
+        // Decrypt using WASM with configuration
         const startTime = performance.now();
-        const decryptedData = decrypt_aes256(uint8Array, password);
+        const decryptedData = decrypt_aes256(uint8Array, password, config);
         const endTime = performance.now();
         const processingTime = ((endTime - startTime) / 1000).toFixed(2);
 
@@ -168,11 +202,21 @@ const runWasm = async () => {
         decryptPasswordInput.value = '';
 
       } catch (error) {
-        setStatus(
-          'decrypt-status',
-          `Decryption failed: ${error.message}. Make sure you're using the correct password and encrypted file.`,
-          'error'
-        );
+        const errInfo = parseWasmError(error);
+        let errorMessage = 'Decryption failed';
+
+        // Provide helpful error messages based on error code
+        if (errInfo.code === 2001) {
+          errorMessage = 'Decryption failed: Wrong password or corrupted file';
+        } else if (errInfo.code === 3001) {
+          errorMessage = 'File is too small to be a valid encrypted file';
+        } else if (errInfo.code) {
+          errorMessage = `Decryption failed (Error ${errInfo.code})`;
+        }
+
+        errorMessage += `. ${errInfo.message}`;
+
+        setStatus('decrypt-status', errorMessage, 'error');
         console.error('Decryption error:', error);
       } finally {
         decryptBtn.disabled = false;

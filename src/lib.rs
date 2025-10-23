@@ -1,102 +1,186 @@
+//! # WASM AES-256 File Encryption Library
+//!
+//! A WebAssembly library for secure file encryption using AES-256-CBC.
+//!
+//! ## Features
+//!
+//! - **AES-256-CBC encryption** with PKCS7 padding
+//! - **PBKDF2-HMAC-SHA256** key derivation with configurable iterations
+//! - **Random salt and IV** generation for each encryption
+//! - **Configurable parameters** exposed to JavaScript
+//! - **Comprehensive error handling** with error codes
+//! - **Well-documented** with examples and tests
+//!
+//! ## Security
+//!
+//! - Uses industry-standard cryptographic algorithms
+//! - Default 100,000 PBKDF2 iterations (configurable)
+//! - Random salt and IV for each encryption operation
+//! - No data transmitted to servers (client-side only)
+//!
+//! ## Usage from JavaScript
+//!
+//! ```javascript
+//! import init, { AesConfig, encrypt_aes256, decrypt_aes256 } from "./pkg/wasm_aes.js";
+//!
+//! await init();
+//!
+//! // Use default configuration
+//! const config = new AesConfig();
+//! const data = new Uint8Array([1, 2, 3, 4, 5]);
+//! const password = "my_secure_password";
+//!
+//! // Encrypt
+//! const encrypted = encrypt_aes256(data, password, config);
+//!
+//! // Decrypt
+//! const decrypted = decrypt_aes256(encrypted, password, config);
+//!
+//! // Custom configuration
+//! const customConfig = new AesConfig();
+//! customConfig.setPbkdf2Iterations(200000);
+//! ```
+//!
+//! ## Usage from Rust
+//!
+//! ```ignore
+//! use wasm_aes::{AesConfig, encrypt_aes256, decrypt_aes256};
+//!
+//! let data = b"Hello, World!";
+//! let password = "my_secure_password";
+//! let config = AesConfig::default();
+//!
+//! let encrypted = encrypt_aes256(data, password, &config)?;
+//! let decrypted = decrypt_aes256(&encrypted, password, &config)?;
+//! ```
+
 use wasm_bindgen::prelude::*;
-use sha2::{Sha256, Digest};
-use aes::Aes256;
-use cbc::{Encryptor, Decryptor};
-use cbc::cipher::{KeyIvInit, BlockEncryptMut, BlockDecryptMut, block_padding::Pkcs7};
-use pbkdf2::pbkdf2_hmac_array;
-use rand::Rng;
 
-type Aes256CbcEnc = Encryptor<Aes256>;
-type Aes256CbcDec = Decryptor<Aes256>;
+// Module declarations
+mod config;
+mod crypto;
+mod error;
 
-const SALT_SIZE: usize = 16;
-const IV_SIZE: usize = 16;
-const KEY_SIZE: usize = 32; // 256 bits
-const PBKDF2_ITERATIONS: u32 = 100000;
+// Re-export public API
+pub use config::AesConfig;
+pub use error::{AesError, ErrorCode};
 
+// Import crypto functions
+use crypto::{encrypt_aes256 as encrypt_impl, decrypt_aes256 as decrypt_impl};
+
+/// Encrypts data using AES-256-CBC with a password.
+///
+/// This function provides a WebAssembly interface to the encryption functionality.
+///
+/// # Arguments
+///
+/// * `data` - The plaintext data to encrypt
+/// * `password` - The password to derive the encryption key from
+/// * `config` - Configuration parameters for encryption
+///
+/// # Returns
+///
+/// Returns encrypted data in the format: `[salt | iv | ciphertext]`
+///
+/// # Errors
+///
+/// Returns a JavaScript error if:
+/// - Input data is empty
+/// - Password is empty
+/// - Configuration is invalid
+/// - Encryption fails
+///
+/// # Examples
+///
+/// ```javascript
+/// const data = new Uint8Array([72, 101, 108, 108, 111]); // "Hello"
+/// const password = "secure_password";
+/// const config = new AesConfig();
+///
+/// try {
+///   const encrypted = encrypt_aes256(data, password, config);
+///   console.log("Encrypted:", encrypted);
+/// } catch (error) {
+///   console.error("Encryption failed:", error);
+/// }
+/// ```
 #[wasm_bindgen]
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub fn encrypt_aes256(data: &[u8], password: &str, config: &AesConfig) -> Result<Vec<u8>, JsValue> {
+    encrypt_impl(data, password, config)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
+/// Decrypts data that was encrypted with `encrypt_aes256`.
+///
+/// This function provides a WebAssembly interface to the decryption functionality.
+///
+/// # Arguments
+///
+/// * `encrypted_data` - The encrypted data (format: `[salt | iv | ciphertext]`)
+/// * `password` - The password used during encryption
+/// * `config` - Configuration parameters (must match encryption config)
+///
+/// # Returns
+///
+/// Returns the original plaintext data.
+///
+/// # Errors
+///
+/// Returns a JavaScript error if:
+/// - Password is incorrect
+/// - Data is corrupted
+/// - Data format is invalid
+/// - Configuration is invalid
+///
+/// # Examples
+///
+/// ```javascript
+/// const encrypted = encrypt_aes256(data, password, config);
+///
+/// try {
+///   const decrypted = decrypt_aes256(encrypted, password, config);
+///   console.log("Decrypted:", decrypted);
+/// } catch (error) {
+///   console.error("Decryption failed:", error);
+/// }
+/// ```
 #[wasm_bindgen]
-pub fn sha256_hash(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    let result = hasher.finalize();
-    format!("{:x}", result)
+pub fn decrypt_aes256(encrypted_data: &[u8], password: &str, config: &AesConfig) -> Result<Vec<u8>, JsValue> {
+    decrypt_impl(encrypted_data, password, config)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
-/// Encrypts data using AES-256-CBC with a password
-/// Returns: [salt (16 bytes) | iv (16 bytes) | encrypted_data]
+/// Get the library version.
+///
+/// # Returns
+///
+/// Returns the version string from Cargo.toml.
 #[wasm_bindgen]
-pub fn encrypt_aes256(data: &[u8], password: &str) -> Result<Vec<u8>, JsValue> {
-    // Generate random salt
-    let mut rng = rand::thread_rng();
-    let mut salt = [0u8; SALT_SIZE];
-    rng.fill(&mut salt);
-
-    // Generate random IV
-    let mut iv = [0u8; IV_SIZE];
-    rng.fill(&mut iv);
-
-    // Derive key from password using PBKDF2
-    let key = pbkdf2_hmac_array::<Sha256, KEY_SIZE>(
-        password.as_bytes(),
-        &salt,
-        PBKDF2_ITERATIONS
-    );
-
-    // Prepare buffer for encryption (needs to be larger for padding)
-    let mut buffer = vec![0u8; data.len() + 16]; // Add extra space for padding
-    buffer[..data.len()].copy_from_slice(data);
-
-    // Encrypt data
-    let cipher = Aes256CbcEnc::new(&key.into(), &iv.into());
-    let encrypted_len = cipher.encrypt_padded_mut::<Pkcs7>(&mut buffer, data.len())
-        .map_err(|e| JsValue::from_str(&format!("Encryption failed: {:?}", e)))?
-        .len();
-
-    // Combine salt + iv + encrypted_data
-    let mut result = Vec::with_capacity(SALT_SIZE + IV_SIZE + encrypted_len);
-    result.extend_from_slice(&salt);
-    result.extend_from_slice(&iv);
-    result.extend_from_slice(&buffer[..encrypted_len]);
-
-    Ok(result)
+pub fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
-/// Decrypts data using AES-256-CBC with a password
-/// Input format: [salt (16 bytes) | iv (16 bytes) | encrypted_data]
+/// Get information about the default configuration.
+///
+/// # Returns
+///
+/// Returns a human-readable string describing the default configuration.
 #[wasm_bindgen]
-pub fn decrypt_aes256(encrypted_data: &[u8], password: &str) -> Result<Vec<u8>, JsValue> {
-    // Check minimum size
-    if encrypted_data.len() < SALT_SIZE + IV_SIZE {
-        return Err(JsValue::from_str("Invalid encrypted data: too short"));
-    }
-
-    // Extract salt, iv, and encrypted data
-    let salt = &encrypted_data[0..SALT_SIZE];
-    let iv = &encrypted_data[SALT_SIZE..SALT_SIZE + IV_SIZE];
-    let ciphertext = &encrypted_data[SALT_SIZE + IV_SIZE..];
-
-    // Derive key from password using PBKDF2
-    let key = pbkdf2_hmac_array::<Sha256, KEY_SIZE>(
-        password.as_bytes(),
-        salt,
-        PBKDF2_ITERATIONS
-    );
-
-    // Create buffer for decryption
-    let mut buffer = vec![0u8; ciphertext.len()];
-    buffer.copy_from_slice(ciphertext);
-
-    // Decrypt data
-    let cipher = Aes256CbcDec::new(&key.into(), iv.into());
-    let decrypted_data = cipher.decrypt_padded_mut::<Pkcs7>(&mut buffer)
-        .map_err(|e| JsValue::from_str(&format!("Decryption failed: {:?}", e)))?;
-
-    Ok(decrypted_data.to_vec())
+pub fn default_config_info() -> String {
+    let config = AesConfig::default();
+    format!(
+        "AES-256-CBC Encryption\n\
+         Salt Size: {} bytes\n\
+         IV Size: {} bytes\n\
+         Key Size: {} bytes (AES-256)\n\
+         PBKDF2 Iterations: {}\n\
+         Min Encrypted Size: {} bytes",
+        config.salt_size(),
+        config.iv_size(),
+        config.key_size(),
+        config.pbkdf2_iterations(),
+        config.min_encrypted_size()
+    )
 }
 
 #[cfg(test)]
@@ -104,41 +188,55 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn test_version() {
+        let version = version();
+        assert!(!version.is_empty());
     }
 
     #[test]
-    fn test_encryption_decryption() {
-        let original_data = b"Hello, World! This is a test message.";
-        let password = "test_password_123";
-
-        // Encrypt
-        let encrypted = encrypt_aes256(original_data, password).unwrap();
-
-        // Verify encrypted data is different and longer (due to salt, iv, and padding)
-        assert_ne!(encrypted.as_slice(), original_data);
-        assert!(encrypted.len() >= original_data.len() + SALT_SIZE + IV_SIZE);
-
-        // Decrypt
-        let decrypted = decrypt_aes256(&encrypted, password).unwrap();
-
-        // Verify decrypted data matches original
-        assert_eq!(decrypted.as_slice(), original_data);
+    fn test_default_config_info() {
+        let info = default_config_info();
+        assert!(info.contains("AES-256"));
+        assert!(info.contains("100000"));
     }
 
     #[test]
-    fn test_wrong_password() {
-        let original_data = b"Secret message";
-        let password = "correct_password";
-        let wrong_password = "wrong_password";
+    #[cfg(target_arch = "wasm32")]
+    fn test_wasm_encrypt_decrypt() {
+        let data = b"Test data for WASM";
+        let password = "test_password";
+        let config = AesConfig::default();
 
-        // Encrypt with correct password
-        let encrypted = encrypt_aes256(original_data, password).unwrap();
+        // Test through WASM interface
+        let encrypted = encrypt_aes256(data, password, &config).unwrap();
+        let decrypted = decrypt_aes256(&encrypted, password, &config).unwrap();
 
-        // Try to decrypt with wrong password - should fail
-        let result = decrypt_aes256(&encrypted, wrong_password);
+        assert_eq!(decrypted, data);
+    }
+
+    #[test]
+    #[cfg(target_arch = "wasm32")]
+    fn test_wasm_error_handling() {
+        let config = AesConfig::default();
+
+        // Test empty data
+        let result = encrypt_aes256(&[], "password", &config);
         assert!(result.is_err());
+
+        // Test empty password
+        let result = encrypt_aes256(b"data", "", &config);
+        assert!(result.is_err());
+
+        // Test decrypt with wrong password
+        let encrypted = encrypt_aes256(b"data", "password", &config).unwrap();
+        let result = decrypt_aes256(&encrypted, "wrong", &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_module_structure() {
+        // Test that all modules are accessible
+        let _config = AesConfig::default();
+        let _error_code = ErrorCode::InvalidInput;
     }
 }
